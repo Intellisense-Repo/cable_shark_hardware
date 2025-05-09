@@ -1,6 +1,6 @@
 /*
 
-
+ 1/4/25   Add the Stop buttion notification command using beep
 */
 
 #include <BLEDevice.h>
@@ -98,13 +98,13 @@ int address = 1;
 
 enum ble_command
 { 
-    config_done = 101 ,  deviate_done = 303,    confirm_done =  301,  panicon_done = 102,  panicoff_done =   103,
-    nrstart_done = 104,  nrstop_done = 105,     desti_done = 302,     vstart_done = 316,   vstop_done = 317,
-    bio_match = 311,     bio_nomatch  = 312,    timeout  = 310,       facematch  = 304,    facenomatch =  305,
-    fpenroll_done = 200, fpempty_done = 204,    fpdelete_done = 203,  fp_store  = 201,     d_close = 307,
-    d_open = 306,        reset_mode  = 315,     dpsw_done  = 107,     newpsw_done = 106,   device_connect = 100,
-    route_wait = 318,    ok_fine = 111,         bio_scan = 310,       reset_done = 308,    bio_done = 200,
-    reg_done = 202,      error = 0      
+    config_done = 101 ,  deviate_done = 303,    confirm_done =  301,   panicon_done = 102,  panicoff_done =   103,
+    nrstart_done = 104,  nrstop_done = 105,     desti_done = 302,      vstart_done = 316,   vstop_done = 317,
+    bio_match = 311,     bio_nomatch  = 312,    timeout  = 310,        facematch  = 304,    facenomatch =  305,
+    fpenroll_done = 200, fpempty_done = 204,    fpdelete_done = 203,   fp_store  = 201,     d_close = 307,
+    d_open = 306,        reset_mode  = 315,     dpsw_done  = 107,      newpsw_done = 106,   device_connect = 100,
+    route_wait = 318,    ok_fine = 111,         bio_scan = 310,        reset_done = 308,    bio_done = 200,
+    reg_done = 202,      force_stop_done = 322, force_facematch = 323, force_nomatch = 324,   error = 0      
 };
 
 
@@ -376,6 +376,7 @@ void device_connecting()
 void working_mode()
 {
   send_message_bt("Working_mode");
+  digitalWrite( led_g, LOW);
   new_string = "nill";                       // led_blink('c');   // digitalWrite( led_g, LOW);
   Serial.println("Waiting for route confirm / panicon / nrstart/ fpenroll,delte,empty / config / disconnetion / o/m psw ");
   while ( deviceConnected )
@@ -501,7 +502,7 @@ void route_confirm_mode()
 {
   door_open = false;
   //vehicle_start();            
-  while (new_string != "deviate" &&  deviceConnected &&  door_open == false  &&  new_string != "destination" )   // Data synchronize with mobie app while driving
+  while (new_string != "deviate" &&  deviceConnected &&  door_open == false  &&  new_string != "destination" && new_string != "force_stop" )   // Data synchronize with mobie app while driving
   {
     delay(3000);
     send_message_bt1(ok_fine);
@@ -518,9 +519,10 @@ void route_confirm_mode()
     working_mode();   
     
   }
-  else if ( new_string.equals("deviate") )  {  log_print("Route deviate"); locking_system();  }       //send_message_bt1( deviate_done); }
-  else if ( door_open == true )             {  log_print("Door open");     locking_system();  }     // send_message_bt1( d_open ); }
-  else if ( !deviceConnected  )             {  log_print("Connection Lost / vehicle theft "); locking_system(); }
+  else if (  new_string.equals("force_stop") ) {  forcely_stop(); }
+  else if ( new_string.equals("deviate") )     {  log_print("Route deviate"); locking_system();  }       //send_message_bt1( deviate_done); }
+  else if ( door_open == true )                {  log_print("Door open");     locking_system();  }     // send_message_bt1( d_open ); }
+  else if ( !deviceConnected  )                {  log_print("Connection Lost / vehicle theft "); locking_system(); }
   // locking_system();                      // Go to the locking system 
 
 }
@@ -719,7 +721,7 @@ void one_hour_timer()
   led_blink('c');
   log_print("One hour timer on");                  
   vehicle_start();
-  for (int j = 0; j < 1; j++)          // 60
+  for (int j = 0; j < 60; j++)          // 60
   {
     for ( int k = 0; k < 30; k++ )  {   led_blink('g');  }                             
   }
@@ -880,7 +882,7 @@ void free_ride()
   led_blink('c');
   log_print("Free ride on ");                   // send_message_bt1( vstart_done );     //  message = "313";  //"Engine Start for one hour";
   vehicle_start();
-  for (int j = 0; j < 1; j++)       // 60
+  for (int j = 0; j < 60; j++)       // 60
   {
     for ( int k = 0; k < 30; k++ )  {   led_blink('g');  }      // one minute timer                            
   }
@@ -963,7 +965,35 @@ void send_message_bt1( ble_command ble_data )
   delay(200);
 }
 
+//**********************
 
+void forcely_stop()
+{
+  log_print("device forcely stop");
+  send_message_bt1( force_stop_done );
+  while(  new_string != "match" && new_string != "notmatch" ) {  buz_beep();  delay(1000); }
+  if ( new_string == "match")
+    {
+      send_message_bt1( force_facematch );      
+      log_print("face match in forcely stop mode");
+      vehicle_stop();
+      working_mode();
+                         
+    }
+
+  else if (new_string == "notmatch" )
+  {
+      send_message_bt1( force_nomatch );         
+      log_print("face no-match in forcely stop mode");
+      new_string = "nill"; 
+      log_print("back to route confirmation mode");
+      route_confirm_mode();      
+
+  }
+  
+
+  
+}
 
 /*****************///////////////////////*************************//
 

@@ -1,0 +1,1958 @@
+
+/*
+  This programe is with the latest BLE Libary of the arduino
+  Modify on 6th june 2024
+ 1/9 to 20/9  update the different operation status code to interact with mobile app.  
+ 27/9  modify the pin of external devices according to the PCB
+ 27/9  buzzer modify accoring to the PCB  active High   // first was avtive low
+ 27/9  relay  modify active high    
+ 19/1/24 == changes in the biometric finger print scanning algorithm 
+ 19/11/24 == changes in the RGB led color in the configure mode. 
+ 19/11/24 == changes in       
+
+  ------- STATUS CODE ---------
+  Any error = 0,    adddevice = "MACXXXXXX"  ,   fpempty = "200"  ,   enroll = "200" ,  70 (Finger print store)  = "201"
+  fpdelet = “203”,  done = "202"    ,   confirm = "301"  ,  destination = "302"   ,  deviate = "303"  ,  match = "304"
+  notmatch = "305" ,  door open = "306",  door close = "307"  ,   reset = "308",    When BLE notify engine stop = “309”
+  finger matched = "311" , finger not matched / timeout = "312"  ,  device connected = "100" ,  device disconnected = "101"
+  Engine start for one hour = "314"; ,  Engine Stop = "313";  .  Reset mode = "315"; 
+  
+  ****************      
+  30 second wait for engine stop after reaching destination               // client req. 2 minute 
+  30 second wait for engine stop after vehicle theft or disconnected.    
+  1  minute engine remain on after biometric                              //  client req. 1 hour  
+  /// 23/1/25
+  1. config command after connecting with the connecting the device. 
+  2. Set and reset config password default paswd 0000
+  3. add panic button for 1 hour or upto stop
+  4. add the nrstrat and nrstop for free ride mode mode for vehicle. 
+
+
+  "config"  command for configurtion the device 
+  "panicon" command for panic button 
+  "panicoff"  command for the panic off fuction.
+  "nrstart"  to start the free ride mode  
+  "nrstop"  to stop the free ride mode. 
+
+
+*/
+
+
+#include <BLEDevice.h>
+#include <BLEServer.h>
+#include <BLEUtils.h>
+#include <BLE2902.h>
+#include <string.h>
+#include <stdlib.h>
+#include <Adafruit_Fingerprint.h>
+#include <HardwareSerial.h>
+#include "EEPROM.h"
+
+//const led = rgb_led;
+
+Adafruit_Fingerprint finger = Adafruit_Fingerprint(&Serial2);
+
+BLEServer *pServer = NULL;
+BLECharacteristic *pTxCharacteristic;
+bool deviceConnected = false;     // App is connected with device
+bool oldDeviceConnected = false;  // App is disconnected
+int button_status = 1;
+uint8_t txValue = 0;
+String ble_name;
+int loop_hold = 0;
+
+// int relay = 6;   // Prototypes
+// int config = 7;
+// int door = 14;
+// int buzzer = 15;
+// int rgb_led = 38;        // 48;           //36;              //
+
+int relay = 5;  // Prototypes
+int config = 4;
+int door = 6;
+int buzzer = 21;
+int rgb_led = 38;  // 48;           //36;              //
+
+int door_status = 1;     // door status
+bool door_open = false;  //  door status during the route configuration mode
+char device_mode;        // = 'S';                           //  device mode R, L, C, F, T etc  Show the current
+
+int raw_data;
+uint8_t id;     // Biometric module finger pritn ID
+uint8_t fp_id;  // = 20;                                 // finger print ID during the finger enroll and delete
+uint8_t found = 0;
+uint32_t chipId = 0;  // To get mac ID
+uint64_t chipid1;     // TO get mac ID
+char ssid1[15];
+char ssid2[15];
+uint64_t macid = 0;
+
+String rconfig   =  "101";
+String rpanicon   =  "102";     // 
+String rpanicof   =  "103"; 
+String rnrstart   =  "104";
+String rnrstop    =  "105";
+String rconfirm  =  "301";
+String rvstart     = "316";
+String rvstop     = "317";
+String rconfirm  = "301";
+String rnpwd     = "106";
+String rppwd     = "107";
+
+
+String fp_id_1 = "70";  // First finger print ID for enrollment
+String fp_id_2 = "75";  // Second finger print ID for enrollment
+String fp_id_3 = "80";  // Third  finger print ID for enrollment
+int fp_add = 6;         // EEPROM address for the finger print ID
+
+unsigned long currentMillis = 0;
+unsigned long previousMillis = 0;
+const long interval = 1000;
+uint8_t tick_value = 0;
+
+char device_con = 'D';      //
+char vehicle_status = 'S';  // Vehicle status
+char destination;           // vehicle status when route will be completed
+
+//std::string ble_data;                                 // string for the ble tx and rx charcterstics
+//std::string  mac_string;
+// std::string message = "Ok FINE";                     // String to send different data via bluetooth.
+// std::string fine = "FINE";                            //  Data synch with mobile app
+// String message1;
+
+String mac_string;           // String to send the mac address
+String new_string;           // string for incoming data
+String message = "Ok FINE";  //  String to send different data via bluetooth.
+String fine = "FINE";        //  Data synch with mobile app
+String message1;
+String ide = "CS_$";  //"MAC";                                    // MAC word prefix for mac address
+String error = "0";
+String sucess = "1";
+
+String uuiidd = "";
+
+int device_config = 1;      // Device configuration mode
+bool finger_match = false;  // Fingerprint match status
+bool finger_store = false;
+bool finger_delete = false;
+char incomingData[10];  // Buffer to store incoming data
+int indx = 0;           // Index to keep track of the position in the buffer
+uint8_t std_data[10];
+
+int address = 1;        // EEPROM read write address
+#define EEPROM_SIZE 50  // EEPROM size
+
+////////////////////////////////////////////////////////////////
+// See the following for generating UUIDs:
+// https://www.uuidgenerator.net/
+
+#define SERVICE_UUID "6E400001-B5A3-F393-E0A9-E50E24DCCA9E"            //  service UUID
+#define CHARACTERISTIC_UUID_RX "6E400002-B5A3-F393-E0A9-E50E24DCCA9E"  //  Rx chacterstic UUID
+#define CHARACTERISTIC_UUID_TX "6E400003-B5A3-F393-E0A9-E50E24DCCA9E"  //  Tx chacterstic UUID
+
+//#define BLE_APPEARANCE_GENERIC_COMPUTER 0x0080
+//#define BLE_APPEARANCE_GENERIC_PHONE 0x0040
+//#define BLE_APPEARANCE_GENERIC_TAG 0x0200                                               // Generic Pad symbol
+
+#define BLE_APPEARANCE_GENERIC_HID 960  // generic HID symbol
+
+//#define BLE_APPEARANCE_GENERIC_KEYRING   576
+
+void door_detection();  // door open or close detection
+void device_configure(void);
+void send_message_bt1();  // send ble message to the mobile app
+void device_connecting();
+
+
+class MyServerCallbacks : public BLEServerCallbacks {
+  //void onConnect(BLEServer* pServer)    { deviceConnected = true; };
+  //////////////////////
+
+  void onConnect(BLEServer *pServer, esp_ble_gatts_cb_param_t *param) {
+    deviceConnected = true;
+    BLEAddress addr = BLEAddress(param->connect.remote_bda);
+    Serial.println("Device connected");
+    Serial.print("Device address: ");
+    Serial.println(addr.toString().c_str());
+    // Print RSSI (signal strength)
+    //int rssi = BLEDevice::getScan()->getRSSI(addr);
+    Serial.print("RSSI: ");
+    // Serial.println(rssi);
+    // You cannot directly get the name and TX power of the connected device as a central device in BLE
+  };
+
+  ///////////////
+
+  void onDisconnect(BLEServer *pServer) {
+    deviceConnected = false;
+  }
+};
+
+class MyCallbacks : public BLECharacteristicCallbacks {
+  void onWrite(BLECharacteristic *pCharacteristic) {
+    new_string = 'O';
+    for (int i = 0; i < sizeof(incomingData); i++)  // clear the buffer imcoming data
+    { incomingData[i] = '\0'; }
+
+    // std::string rxValue = pCharacteristic->getValue();
+    String rxValue = pCharacteristic->getValue();
+
+    if (rxValue.length() > 0) {
+      //indx = (rxValue.length() - 2) ;                                               // APP setting CR+LF etc. ( Bluetooth Terminal app) // find out the length of received data
+      indx = (rxValue.length());  // APP setting is newline is none
+      Serial.println(indx);
+
+      for (int j = 0; j < indx; j++)     // load data into incomingdata buffer
+      { incomingData[j] = rxValue[j]; }  // indx++;
+
+      new_string = String(incomingData);  // convert the array into string
+      Serial.println(new_string);
+      Serial.println("*******");
+
+      if (new_string == "confirm")  // route confirmed
+      {
+        vehicle_status = 'R';
+        Serial.println("Vehicle Route Confirmed----");
+      }
+
+      else if (new_string == "deviate")  // route daviation
+      {
+        vehicle_status = 'D';
+        Serial.println("Vehicle Route deviate----");
+      }
+
+      else if (new_string == "match")  // fase pwd and keyword matched
+      {
+        vehicle_status = 'M';
+        Serial.println("FP & Keyword Matched----");
+      }
+
+      else if (new_string == "notmatch")  // fase pwd and keyword matched
+      {
+        vehicle_status = 'N';
+        Serial.println("FP & Keyword Not Matched----");
+      }
+
+      else if (new_string == "fenroll")  // Finger print enrollment
+      {
+        vehicle_status = 'L';
+        Serial.println("Finger Print Enrollment----");
+      }
+
+      else if (new_string == "fdelete")  // Biometric print
+      {
+        vehicle_status = 'E';
+        Serial.println("Finger Print Delete----");
+      }
+    }
+    delay(50);
+  }
+};
+
+
+void setup() {
+  //Serial.begin(115200);
+  pinMode(rgb_led, OUTPUT);   // rgb_led  RGB LED pin
+  pinMode(relay, OUTPUT);     //  relay  Relay pin
+  pinMode(buzzer, OUTPUT);    //   Buzzer pin
+  pinMode(config, INPUT);     //  15 Device config mode
+  pinMode(door, INPUT);       //    14 Door lock
+  digitalWrite(relay, LOW);   // HIGH
+  digitalWrite(buzzer, LOW);  //   HIGH
+  digitalWrite(config, HIGH);
+  digitalWrite(door, HIGH);
+
+  Serial.begin(57600);  //  (9600);
+  Serial2.begin(115200);
+
+  ////////////////
+
+  EEPROM.begin(EEPROM_SIZE);
+
+  ////////// Biometric Module /////////
+
+  //while (!Serial);  // For Yun/Leo/Micro/Zero/...
+  delay(100);
+  Serial.println("\n\nAdafruit Fingerprint sensor enrollment");
+
+  // set the data rate for the sensor serial port
+  finger.begin(57600);
+
+  if (finger.verifyPassword()) {
+    Serial.println("Found fingerprint sensor!");
+  }
+
+  else {
+    Serial.println("Did not find fingerprint sensor :(");
+    //while (1) { delay(1); }
+  }
+
+  Serial.println(F("Reading sensor parameters"));
+  finger.getParameters();
+  Serial.print(F("Status: 0x"));
+  Serial.println(finger.status_reg, HEX);
+  Serial.print(F("Sys ID: 0x"));
+  Serial.println(finger.system_id, HEX);
+  Serial.print(F("Capacity: "));
+  Serial.println(finger.capacity);
+  Serial.print(F("Security level: "));
+  Serial.println(finger.security_level);
+  Serial.print(F("Device address: "));
+  Serial.println(finger.device_addr, HEX);
+  Serial.print(F("Packet len: "));
+  Serial.println(finger.packet_len);
+  Serial.print(F("Baud rate: "));
+  Serial.println(finger.baud_rate);
+  delay(500);
+
+  //////////////
+
+  device_mode = EEPROM.read(1);
+  delay(5);
+  Serial.println(device_mode);
+  // raw_data = EEPROM.read(5);
+  // delay(100);
+  // Serial.println(raw_data);
+
+  ////////////////////
+  get_mac_id();
+  ble_name = (ide + mac_string);
+  Serial.println(ble_name);
+
+
+  ////// Create the BLE Device  /////////
+
+  // BLEDevice::init("Cable-Shark");                               //  BLE display Name
+  BLEDevice::init(ble_name);  //  BLE display Name
+
+  // Create the BLE Server
+  pServer = BLEDevice::createServer();
+  pServer->setCallbacks(new MyServerCallbacks());
+  // Create the BLE Service
+  BLEService *pService = pServer->createService(SERVICE_UUID);
+  // Create a BLE Characteristic
+  pTxCharacteristic = pService->createCharacteristic(
+    CHARACTERISTIC_UUID_TX,
+    BLECharacteristic::PROPERTY_NOTIFY);
+
+  pTxCharacteristic->addDescriptor(new BLE2902());
+  BLECharacteristic *pRxCharacteristic = pService->createCharacteristic(
+    CHARACTERISTIC_UUID_RX,
+    BLECharacteristic::PROPERTY_WRITE);
+
+  pRxCharacteristic->setCallbacks(new MyCallbacks());
+
+  // Start the service
+  pService->start();
+
+  /////////////////////////////////  changes for
+
+  //addDeviceInformationService(pServer);
+  BLEAdvertising *pAdvertising = BLEDevice::getAdvertising();
+  pAdvertising->setAppearance(BLE_APPEARANCE_GENERIC_HID);  // Change to desired appearance value
+
+  //////////////////////////////
+
+  pServer->getAdvertising()->start();
+  Serial.println("Waiting a client connection to notify...");
+
+
+  //************************ DEVICE CONFIGURATION MODOE *************************
+
+  get_mac_id();
+  
+}
+
+////////////////////
+
+
+  void ble_connection()
+  {
+    if (!deviceConnected)  // device not connected
+    {
+      pServer->startAdvertising();  // restart advertising
+      Serial.println("Device connecting......");
+      while (!deviceConnected)
+      {  
+        neopixelWrite(rgb_led, 119, 65, 69);  // pink  238, 130, 138);
+        delay(1000);
+        neopixelWrite(rgb_led, 0, 0, 0);
+        delay(1000);
+      }
+      delay(5);
+
+      //Serial.println("Device connected");
+      neopixelWrite(rgb_led, 119, 65, 69);  // Green
+      message = "Device Connected";
+      send_message_bt1();
+      message = "100";
+      send_message_bt1();
+      send_mac_add();
+    }
+ 
+    // Device conneted
+    else if (deviceConnected)  { Serial.println("Already Connected");   } 
+    delay(50);
+  }
+
+
+//////////////////////  device configuration function 
+
+ void device_configuration()
+ {
+
+//device_config = digitalRead(config);
+
+  if (device_config == 0) 
+  {
+    neopixelWrite(rgb_led, 238, 130, 138);  //neopixelWrite(rgb_led, 127, 0, 250);
+    Serial.print("Device Reg. MODE");
+    //device_connecting();
+               ble_connection();                  //19/11/2024
+    message = "registration";  // send registration to ble app
+    send_message_bt1();
+
+    while (new_string != "done")  /// &&  deviceConnected )
+    {
+      if (new_string == "adddevice")    { add_device(); }  // Add new device
+      else if (new_string == "enroll")  { fingerprint_enroll(); }                                                           // Enroll the finger print into the device
+      else if (new_string == "delete")  { fingerprint_delete(); }  // Delete the finger print from the device
+      else if (new_string == "fpempty") { fpmodule_empty();    }  //  Empty the data base of fingerprint module
+
+      delay(100);
+    }
+
+    message = "202";  //sucess;               //"Reg. Done Successfully";
+    send_message_bt1();
+    // delay(1000);
+    message = "Device will be Restart";
+    send_message_bt1();
+    Serial.println("Device will be restart in 2 seconds");
+    delay(2000);
+    esp_restart();
+
+    //while(1) { }      // forever loop
+    //  device_configure();
+    //  delay(50);
+    //  message = "Reg. Done";
+    //  Serial.print("Reg. Done");
+    //  send_message_bt();
+    //  delay(100);
+    //  message = "--Restart--";
+    //  Serial.print("--Restart--");
+    //  send_message_bt();
+    //  while(1);   // for every loop
+  }
+
+
+
+   
+ }
+
+
+
+  ////////////////////////////
+
+
+//////////////////////////////////////  
+
+//             main loop
+
+////////////////////////////////////////
+
+void loop() {
+
+  // fp_id = 30;
+  //EEPROM.write(5, fp_id );
+  //EEPROM.commit();
+  // fp_id = EEPROM.read(5);
+  // Serial.printf("fp_id:- %d\n", fp_id);
+  switch (device_mode) {
+
+    case 'S':
+
+      device_connecting();  //  Device BLE connection establish 
+
+      break;
+
+    case 'R':
+
+      route_confirm();  //  Device route confirmation
+
+      break;
+
+    case 'L':
+
+      locking_system();  //  Device Lock system
+
+      break;
+
+    case 'B':
+
+      fingerprint_detection();  // Fingerprint reading and matching
+
+      break;
+
+    case 'E':  //   Reset / End point of the Device.
+
+
+      EEPROM.write(1, device_mode);
+      EEPROM.commit();
+      delay(50);
+      reset_to_device();
+
+      break;
+
+    default:
+
+      Serial.println("Device Mode not Match");
+      Serial.println("Store Device Mode");
+      EEPROM.write(1, 'S');
+      EEPROM.commit();
+      delay(50);
+      //  device_mode = EEPROM.read(1);
+      //  Serial.println(device_mode);
+      //  EEPROM.write(5, 10);
+      //  EEPROM.commit();
+      //  delay(100);
+      //  raw_data = EEPROM.read(5);
+      //  Serial.println(raw_data);
+      //  //while(1);
+      delay(2000);
+      break;
+  }
+}
+
+
+//***************************
+
+
+void get_mac_id() {
+  uint32_t chipId = 0;
+  for (int i = 0; i < 17; i = i + 8) {
+    chipId |= ((ESP.getEfuseMac() >> (40 - i)) & 0xff) << i;
+  }
+
+  //Serial.printf("ESP32 Chip model = %s Rev %d\n", ESP.getChipModel(), ESP.getChipRevision());
+  //Serial.printf("This chip has %d cores\n", ESP.getChipCores());
+  //Serial.print("Chip ID: ");
+  // Serial.println(chipId);
+  mac_string = String(chipId);
+  Serial.println(mac_string);
+  delay(1);
+
+
+  //delay(3000);
+
+
+  // old mac address code
+
+  // uint64_t chipid = ESP.getEfuseMac();  // The chip ID is essentially its MAC address(length: 6 bytes).
+  // macid = chipid;
+  //          Serial.println(chipid);
+  //          uuiidd = String(chipid);               //c_str();
+  //          Serial.println(uuiidd);
+  // uint16_t chip = (uint16_t)(chipid >> 32);
+  //          Serial.println(chip);
+  // snprintf(ssid1, 15, "%04X", chip);
+  // snprintf(ssid2, 15, "%08X", (uint32_t)chipid);
+  //           Serial.println(ssid1);
+  //           Serial.println("");
+  //           Serial.println(ssid2);
+  // mac_string =   String(ssid2).c_str();
+  //           delay(10);
+  //                                     mac_string = String(ssid2);
+  //                                     Serial.println(mac_string);
+}
+
+
+
+
+
+//********************************
+
+void send_mac_add() {
+  Serial.println("MAC ID: ");
+  Serial.println(ide + mac_string);               // Serial.println(String(ssid2));     // (mac_string);   // 1/7
+  pTxCharacteristic->setValue(ide + mac_string);  //  (macid);   //((uint32_t *)&mac, 4);
+  pTxCharacteristic->notify();
+  delay(150);
+}
+
+
+
+//*****************
+
+
+void send_message_bt() {
+  // ble_data =   message.c_str();         //message;
+  // pTxCharacteristic->setValue(ble_data);
+}  
+
+
+  void send_message_bt1(String ble_cmd)
+  {
+    //ble_data =  message.c_str();     // message;
+    pTxCharacteristic->setValue(ble_cmd);
+    pTxCharacteristic->notify();
+    // message1 = String(message.c_str());
+    //Serial.println(message1);
+    Serial.println(message);
+    delay(100);
+  }
+
+
+
+  //********************************  Device configuration Fingerprint Enrollment, Delete and MAC ID
+  /*
+
+void device_configure()                               //  Device Configuration  
+{
+  device_connecting();                                //  device connection
+  int hold1 = 0;
+  loop_hold = 0;  
+  while( hold1 != 1)
+  {      
+    if (new_string == "adddevice" )
+    {                                                 // Add the device
+      get_mac_id();
+      // pTxCharacteristic->setValue(mac_string);     //  (macid);   //((uint32_t *)&mac, 4);  
+      // pTxCharacteristic->notify(); 
+      Serial.println("MAC ID: ");                     //Serial.println(macid); 
+      Serial.println(mac_string);                     //  (String(ssid2));    //          
+      message = mac_string;
+      send_message_bt1();
+      
+      while( new_string != "ok" && new_string != "error")  
+      {
+        // wait for ok confirmation signal.
+      }
+      if (new_string == "OK")
+      {         
+        
+      }         
+      //new_string = '0'; 
+          
+    }
+          
+    else if( new_string ==  "enroll" )                           // Enroll the finger
+    {                                 
+      delay(1000);
+      digitalWrite(buzzer,  LOW);
+      delay(300);
+      digitalWrite(buzzer, HIGH);            
+      message = "Press Finger";  
+      send_message_bt1();
+      delay(2000);  
+      loop_hold = 0;
+      while ( loop_hold != 1)                          // getFingerprintEnroll();
+      {               
+        getFingerprintEnroll();
+        if( finger_store == true)
+        {
+          message = "Finger Store";
+          send_message_bt1();
+          digitalWrite(buzzer,  LOW);
+          delay(1000);
+          digitalWrite(buzzer, HIGH);            
+          fp_id = fp_id + 1;                            // increment the ID number                
+          loop_hold = 1;
+        } 
+          
+        else if( finger_store == false)
+        {
+          message = "Error";
+          send_message_bt1();
+          loop_hold = 1;
+        }         
+                    
+      } 
+
+       while( new_string != "ok" && new_string != "error") 
+      {
+        // wait for ok confirmation signal.
+      }
+
+    }         // break;
+
+    else if ( new_string ==  "delete" )              // Delete the finger print
+    {                              
+      delay(1000);    
+      digitalWrite(buzzer,  LOW);
+      delay(300);
+      digitalWrite(buzzer, HIGH);            
+      message = "Press Finger";
+      send_message_bt1();
+      delay(2000);
+      loop_hold = 0;
+      while ( loop_hold != 1)                          // getFingerprintEnroll();
+      {              
+        getFingerprintIDez();
+        delay(150);
+        //if( finger_match )                         //  finger_match = true   ( found == 2 || found == 6)
+        if(finger_match == true ) 
+        {
+          deleteFingerprint(id);       
+          //message = id;   
+          if( finger_delete == true)
+          {
+            message = "Finger Delete";
+            send_message_bt1();
+            fp_id = fp_id - 1;            
+            loop_hold = 1;
+          }
+
+          else if( finger_delete == false)
+          {
+            message = "Error";
+            send_message_bt1();
+            loop_hold = 1;
+          } 
+        }
+
+        if(finger_match == false )
+        {
+          message = "Not match";
+          send_message_bt1(); 
+          loop_hold = 1;                              
+        }        
+      }
+
+
+      while( new_string != "ok" && new_string != "error") 
+      {
+        // wait for ok confirmation signal.
+      }
+        finger_match == false;
+    }        // break;         
+
+
+    else if ( new_string == "done" )         // Device configure successfully
+    {                         
+
+      message = "Data Save";
+      send_message_bt1();  
+      loop_hold = 1;
+      hold1 = 1;    
+      delay(100);  
+     
+      while( new_string != "ok" && new_string != "error") 
+      {
+        // wait for ok confirmation signal.
+        
+      }
+  
+    }      // break;      
+                         
+  }    
+
+}
+
+
+*/
+
+  //********************************   BLE Connection with mobile app  connected or disconnected
+
+
+  void device_connecting() {
+    if (!deviceConnected)  // device not connected
+    {
+      pServer->startAdvertising();  // restart advertising
+      Serial.println("Device connecting......");
+      while (!deviceConnected) {
+        neopixelWrite(rgb_led, 0, 0, 150);  // Blue
+        delay(1000);
+        neopixelWrite(rgb_led, 0, 0, 0);
+        delay(1000);
+      }
+      delay(5);
+
+      //Serial.println("Device connected");
+      neopixelWrite(rgb_led, 0, 0, 150);  // Green
+      message = "Device Connected";
+      send_message_bt1();
+      message = "100";
+      send_message_bt1();
+
+      send_mac_add();
+      // Serial.println("MAC ID: ");
+      // Serial.println(ide + mac_string);                // Serial.println(String(ssid2));     // (mac_string);   // 1/7
+      // pTxCharacteristic->setValue(ide + mac_string);   //  (macid);   //((uint32_t *)&mac, 4);
+      // pTxCharacteristic->notify();
+
+      device_mode = 'R';
+
+    }
+
+
+    else if (deviceConnected)  // Device conneted
+    {
+
+      Serial.println("Already Connected");
+      device_mode = 'R';
+    }
+
+    delay(50);
+  }
+
+
+  //********************************  Vehicle route confirmation
+
+
+  void route_confirm()
+  {
+
+    door_status = digitalRead(door);
+    if (door_status == 1) { door_open = false; }  // driver door is close
+    else if (door_status == 0) {
+      door_open = true;
+    }  // driver door is open
+
+   // message = "Route-?";     
+   // send_message_bt1(message);
+    // waiting for ROUTE, PANICON, NRSTART, DISCONNECTION etc. 
+    Serial.println("Waiting for route confirm / panicon / nrstart / config or disconnetion ");
+    while ( new_string != "confirm" && new_string != "panicon" &&  new_string != "nrstart" && deviceConnected )   // Route confirmation
+    {
+      neopixelWrite(rgb_led, 150, 150, 0);   delay(1000);
+      neopixelWrite(rgb_led, 0, 0, 0);       delay(1000);
+    }
+
+    if (deviceConnected)
+    {
+      neopixelWrite(rgb_led, 0, 150, 0);  // Green LED glow
+      //message = "301";                    //"Route Confirmed";
+      //send_message_bt1(rconfirm);  
+     // delay(1000);
+      message = "Engine Start";          //Serial.println("Engine Start");
+      send_message_bt1();
+      digitalWrite(relay, HIGH);         //digitalWrite(relay, LOW);
+      delay(5);
+      digitalWrite(relay, HIGH);  //digitalWrite(relay, LOW);
+      Serial.println("vehicle stop");
+      send_message_bt1(vstop);
+
+      if ( new_string == "panicon" ||  new_string == "nrstart" )
+      {      
+        if ( new_string == "panicon")       { Seria.println("panic pressed");   send_message_bt1(panicon);  } 
+        else if ( new_string == "nrstart")  { Serial.println("No route start");  send_message_bt1(nrstart); }
+        Serial.println("Waiting for panicoff / nrstop ");
+        while ( new_string != "panicoff" && new_string != "nrstop" && deviceConnected )
+        {
+          Serial.println("Device in Panic or nr mode ");
+          delay(3000);                            
+        } 
+        Serial.println("Device out form Panic/fride");
+        digitalWrite(relay, LOW);   delay(5);   digitalWrite(relay, LOW); 
+        if ( new_string == "panicoff")     { Seria.println("panic stop");   send_message_bt1(panicoff);  } 
+        else if ( new_string == "nrstop")  { Serial.println("No route stop");  send_message_bt1(nrstop); }
+        delay(1000);
+        Serial.println("vehicle stop");
+        send_message_bt1(vstop);
+
+
+
+        Serial.println("Engine off");
+      }
+
+       
+              
+          
+      //while( vehicle_status != 'D'   && deviceConnected && door_open == false)
+
+      while (new_string != "deviate" && deviceConnected && door_open == false && new_string != "destination")  
+      {
+        delay(3000);
+        message = "fine";
+        //Serial.print(" fine ");
+        send_message_bt1();
+        door_status = digitalRead(door);
+
+        if (door_status == 0) {
+          door_detection();
+        }
+      }
+
+      device_mode = 'L';  // Device Lock mode
+
+      if (new_string == "destination") {
+        //Serial.println("Route Complete");
+        message = "302";  //"Route Complete";
+        send_message_bt1();
+        delay(30000);              // wait 30 second time to stop the engine.
+        digitalWrite(relay, LOW);  //digitalWrite(relay, HIGH);
+        //Serial.println("Engine Stop");
+        message = "Engine Stop";
+        send_message_bt1();
+        device_mode = 'S';  // Route confirmation mode
+      }
+
+    }
+
+    else if (!deviceConnected) {
+      Serial.println("Connection Lost");  // device disconnected
+      message = "101";
+      send_message_bt1();
+      delay(500);
+      device_mode = 'S';  // Device is start
+    }
+
+    delay(50);
+  }
+
+  //********************************  Door Lock detection
+
+
+  void door_detection() {
+    int value = 0;
+    int wait = 0;
+    delay(500);
+    door_status = digitalRead(door);
+    if (door_status == 0) {
+      //Serial.println("Door open");
+      message = "306";  // "Door open";
+
+      send_message_bt1();
+      Serial.println("wait for 30 Second");
+      while (door_status == 0 && value < 15)  // Wait for the 30 seconds
+      {
+        value++;
+        door_status = digitalRead(door);
+        neopixelWrite(rgb_led, 0, 150, 0);
+        delay(1000);  // green ling blining while door is open
+        neopixelWrite(rgb_led, 0, 0, 0);
+        delay(1000);
+      }
+
+      delay(500);
+      door_status = digitalRead(door);  // Re checkque the Door of the vehicle
+
+      // if ( door_status == 0)
+      switch (door_status) {
+        case 0:  // Door is still open
+          finger_match = false;
+          Serial.println("Biometric On");
+          Serial.println("Press Finger");
+          message = "310";  //"Biometric On";
+          send_message_bt1();
+          //message = "Press Finger";
+          // send_message_bt1();
+
+
+          check_time();
+          // while( tick_value <= 60 && wait != 1)        // Time for 1 minute
+
+          while (wait != 1)  // Time for 1 minute
+          {
+            neopixelWrite(rgb_led, 0, 0, 0);
+            digitalWrite(buzzer, HIGH);  //digitalWrite(buzzer, LOW);
+            delay(500);
+            digitalWrite(buzzer, LOW);  //digitalWrite(buzzer, HIGH);
+            delay(500);
+            neopixelWrite(rgb_led, 0, 150, 0);
+            check_time();
+            getFingerprintIDez();
+            //delay(250);
+            //if( finger_match )                        //( found == 2 || found == 6)
+            if (finger_match == true) {
+              Serial.println("Fingerprint match");
+              message = "311";  //"Fingerprint Match";
+              send_message_bt1();
+              // message = id;
+              // send_message_bt1();
+              neopixelWrite(rgb_led, 0, 150, 0);
+              door_open = false;
+              finger_match = false;
+              wait = 1;
+            }
+
+            if (tick_value >= 60) {
+
+              Serial.println("Finger Not Press/not match");
+              Serial.println("Time Up");
+              message = "312";  //"Finger Not Press";
+              send_message_bt1();
+              message = "Time Up";
+              send_message_bt1();
+              vehicle_stop();
+              door_open = true;
+              finger_match = false;
+              // device_mode = 'B';                  // Device mode is biometric reading
+              // loop();                             // Back to the main loop
+              wait = 1;
+            }
+          }
+
+          break;
+
+        case 1:  // Door is close
+          door_open = false;
+          neopixelWrite(rgb_led, 0, 150, 0);  // green
+          //Serial.println("Door close");
+          message = "307";  //"Door close";
+          send_message_bt1();
+
+          break;
+      }
+    }
+  }
+
+
+  //********************************  Vehicle Engine Locking system
+
+
+  void locking_system() {
+
+    switch (door_open) {
+
+      case true:
+
+        delay(1000);
+        Serial.println("Door close time up");
+        vehicle_stop();
+        device_mode = 'B';  // go to the Biometric mode
+
+        break;
+
+      case false:
+
+        if (!deviceConnected)  // Mobile phone outside the vehicle or disconnected
+        {
+          Serial.println("Device Disconnected");
+          Serial.println("Vehicle Theft");
+          message = "101";  //     "Vehicle Teheft";
+          send_message_bt1();
+          //delay(15000); //delay(120000);
+          vehicle_stop();
+          device_mode = 'B';  // go to the Biometric mode
+
+        }
+
+
+        else if (deviceConnected)  // route deviate   // Mobile phone inside the vehicle or Connected
+        {
+          //Serial.println("Check FP & Keyw or psw");
+          message = "303";  //"Check FP & Keyw or psw ";
+          send_message_bt1();
+          delay(1000);
+          //Serial.print("Waiting...");
+          message = "Waiting...";
+          send_message_bt1();
+
+          // while( vehicle_status != 'N' && vehicle_status != 'M')   // Data synchronize with mobie app while driving
+
+          while (new_string != "match" && new_string != "notmatch")  // Data synchronize with mobie app while driving
+          {
+            neopixelWrite(rgb_led, 255, 100, 0);  // orange
+            delay(1000);
+            neopixelWrite(rgb_led, 0, 0, 0);  // orange
+            delay(1000);
+            //Serial.print("Waiting...");
+            //message = "Waiting...";
+            //send_message_bt();
+          }
+
+          //  if (vehicle_status == 'N')                  // Driver credential are not matched
+          if (new_string == "notmatch") {
+            message = "305";  //"Waiting...";
+            send_message_bt1();
+            Serial.println("FP,Keyw not match");
+            vehicle_stop();
+            device_mode = 'B';
+            // fingerprint_detection();
+
+          }
+
+          //else if (vehicle_status == 'M')               // Driver credential are matched
+          else if (new_string == "match") {
+            message = "304";  //"Waiting...";
+            send_message_bt1();
+            Serial.println("FP,Keyw match");
+            // Serial.println("Engine Start");
+            // send_message_bt();
+            // message = "Engine Start";
+            // digitalWrite(relay, LOW);
+            // message = "Reset Route";
+            // Serial.println("Reset Route");
+            // send_message_bt();
+            //delay(1000);
+
+            device_mode = 'R';  // Device mode is Route confirmation
+          }
+        }
+
+        break;
+    }
+  }
+
+
+  //********************************  Fingerprint detection
+
+
+  void fingerprint_detection() {
+    int hold = 0;
+    finger_match = false;
+    //Serial.println("Biometric On");
+    //Serial.println("Press Finger");
+    message = "Biometric On";
+    send_message_bt1();
+    message = "Press Finger";
+    send_message_bt1();
+    message = "310";
+    send_message_bt1();
+
+    while (hold != 1) {
+      //read_biometric();
+      // getFingerprintIDez();
+      getFingerprintID();  // add on 19/11/2024
+      delay(200);          //         // 250 was previous value
+      //if( finger_match )       //  finger_match = true   ( found == 2 || found == 6)
+      if (finger_match == true) {
+        //Serial.println("Fingerprint match");
+        Serial.println("");
+        message = "311";  //"Fingerprint Match";
+        send_message_bt1();
+        //message = id;
+        // send_message_bt1();
+        message = "Fingerprint Match";
+        send_message_bt1();
+        hold = 1;
+      }
+    }
+
+    finger_match = false;
+    one_hour_timer();
+    device_mode = 'E';  // Device mode is Reset / END
+    //loop();                     // back to main loop
+  }
+
+
+
+  //********************************
+
+  void vehicle_stop() {
+
+    //Serial.println("Vehicle Theft");
+    delay(30000);  // wait for 30 second to stop the engine
+    //message = "Vehicle Teheft";
+    //send_message_bt1();
+    //Serial.println("Engine Stop");
+
+    digitalWrite(relay, LOW);  //digitalWrite(relay, HIGH);
+    delay(5);
+    digitalWrite(relay, LOW);
+    neopixelWrite(rgb_led, 100, 0, 0);  // Green
+    message = "309";                    //"Engine Stop";
+    send_message_bt1();
+  }
+
+  //********************************
+
+  void one_hour_timer() {
+    message = "313";  //"Engine Start for one hour";
+    send_message_bt1();
+    Serial.println("Engine Start for one hour");
+    digitalWrite(relay, HIGH);  //digitalWrite(relay, LOW);
+    delay(5);
+    digitalWrite(relay, HIGH);
+
+    for (int j = 0; j < 120; j++) {
+      delay(150);  //  2 minute delay delay(1000);
+    }
+
+    message = "314";  //"Engine Stop";
+    send_message_bt1();
+    Serial.println("Engine Stop");
+    send_message_bt1();
+    digitalWrite(relay, LOW);  //digitalWrite(relay, HIGH);
+    delay(50);
+    digitalWrite(relay, LOW);
+  }
+
+
+
+  //********************
+
+
+
+  uint8_t readnumber(void) {
+    uint8_t num = 0;
+
+    while (num == 0) {
+      while (!Serial.available())
+        ;
+      num = Serial.parseInt();
+    }
+    return num;
+  }
+
+
+  //********************
+
+
+  void check_time() {
+    currentMillis = millis();
+
+    if (currentMillis - previousMillis >= interval) {
+      previousMillis = currentMillis;
+      tick_value++;
+    }
+  }
+
+
+  //********************* Reset the device
+
+
+  void reset_to_device() {
+    int stay = 0;
+    Serial.println("Reset the Device");
+    delay(5000);
+    while (stay != 1) {
+
+      if (deviceConnected)  // Device conneted
+      {
+        Serial.println("Already Connected");
+
+      }
+
+      else if (!deviceConnected)  // device not connected
+      {
+        pServer->startAdvertising();  // restart advertising
+        Serial.println("Device connecting......");
+        while (!deviceConnected) {
+          neopixelWrite(rgb_led, 50, 0, 0);  // Blue
+          delay(1000);
+          neopixelWrite(rgb_led, 0, 0, 0);
+          delay(1000);
+        }
+        Serial.println("Device connected");
+        neopixelWrite(rgb_led, 50, 0, 0);  // Green
+        message = "Device Connected";
+        send_message_bt1();
+        message = "100";
+        send_message_bt1();
+
+        //delay(150);
+        send_mac_add();
+        // Serial.println("MAC ID: ");
+        // //Serial.println(mac_string);                                   //(String(ssid2));
+        // //Serial.println(mac_string);
+        // Serial.println(ide + mac_string);
+        // pTxCharacteristic->setValue(ide + mac_string);                  //  (macid);   //((uint32_t *)&mac, 4);
+        // pTxCharacteristic->notify();
+      }
+
+      message = "315";  //  Reset mode
+      send_message_bt1();
+      Serial.println("Reset Mode");
+      message = "Reset Mode";
+      send_message_bt1();
+
+      while (new_string != "reset" && deviceConnected) {}  //
+
+      if (new_string == "reset") { stay = 1; }
+    }
+
+    digitalWrite(buzzer, HIGH);  //digitalWrite(buzzer, LOW);
+    delay(1000);
+    digitalWrite(buzzer, LOW);  //digitalWrite(buzzer, HIGH);
+    Serial.println("Device Reset Ok");
+    message = "308";  //"Device Reset Ok";
+    send_message_bt1();
+    neopixelWrite(rgb_led, 0, 0, 0);
+    device_mode = 'S';
+    EEPROM.write(1, device_mode);  // store the start_mode to EEPROM
+    EEPROM.commit();
+    delay(5000);  // wait for Five seconds
+    loop();
+  }
+
+
+
+  ///////// finger print enrollment /////////////
+
+
+
+  uint8_t getFingerprintEnroll() {
+
+    int p = -1;
+    Serial.print("Waiting for valid finger to enroll as #");
+    Serial.println(id);
+    while (p != FINGERPRINT_OK) {
+      p = finger.getImage();
+      switch (p) {
+        case FINGERPRINT_OK:
+          Serial.println("Image taken");
+          break;
+        case FINGERPRINT_NOFINGER:
+          Serial.print(".");
+          break;
+        case FINGERPRINT_PACKETRECIEVEERR:
+          Serial.println("Communication error");
+          break;
+        case FINGERPRINT_IMAGEFAIL:
+          Serial.println("Imaging error");
+          break;
+        default:
+          Serial.println("Unknown error");
+          break;
+      }
+    }
+
+    // OK success!
+
+    p = finger.image2Tz(1);
+    switch (p) {
+      case FINGERPRINT_OK:
+        Serial.println("Image converted");
+        break;
+      case FINGERPRINT_IMAGEMESS:
+        Serial.println("Image too messy");
+        return p;
+      case FINGERPRINT_PACKETRECIEVEERR:
+        Serial.println("Communication error");
+        return p;
+      case FINGERPRINT_FEATUREFAIL:
+        Serial.println("Could not find fingerprint features");
+        return p;
+      case FINGERPRINT_INVALIDIMAGE:
+        Serial.println("Could not find fingerprint features");
+        return p;
+      default:
+        Serial.println("Unknown error");
+        return p;
+    }
+
+    Serial.println("Remove finger");
+
+    // digitalWrite(buzzer, LOW);     // buzzer on
+    delay(10);  //delay(2000);
+                // digitalWrite(buzzer, HIGH);
+    delay(10);
+    // p = 0;
+    // while (p != FINGERPRINT_NOFINGER)
+    // {
+    //   p = finger.getImage();
+    // }
+    Serial.print("ID ");
+    Serial.println(id);
+    p = -1;
+    Serial.println("Place same finger again");
+
+    //digitalWrite(15, HIGH);    // buzzer off
+    //delay(1500);
+
+    while (p != FINGERPRINT_OK) {
+      p = finger.getImage();
+      switch (p) {
+        case FINGERPRINT_OK:
+          Serial.println("Image taken");
+          break;
+        case FINGERPRINT_NOFINGER:
+          Serial.print(".");
+          break;
+        case FINGERPRINT_PACKETRECIEVEERR:
+          Serial.println("Communication error");
+          break;
+        case FINGERPRINT_IMAGEFAIL:
+          Serial.println("Imaging error");
+          break;
+        default:
+          Serial.println("Unknown error");
+          break;
+      }
+    }
+
+    // OK success!
+
+    p = finger.image2Tz(2);
+    switch (p) {
+      case FINGERPRINT_OK:
+        Serial.println("Image converted");
+        break;
+      case FINGERPRINT_IMAGEMESS:
+        Serial.println("Image too messy");
+        return p;
+      case FINGERPRINT_PACKETRECIEVEERR:
+        Serial.println("Communication error");
+        return p;
+      case FINGERPRINT_FEATUREFAIL:
+        Serial.println("Could not find fingerprint features");
+        return p;
+      case FINGERPRINT_INVALIDIMAGE:
+        Serial.println("Could not find fingerprint features");
+        return p;
+      default:
+        Serial.println("Unknown error");
+        return p;
+    }
+
+    // OK converted!
+    Serial.print("Creating model for #");
+    Serial.println(id);
+
+    p = finger.createModel();
+    if (p == FINGERPRINT_OK) {
+      Serial.println("Prints matched!");
+    } else if (p == FINGERPRINT_PACKETRECIEVEERR) {
+      Serial.println("Communication error");
+      return p;
+    } else if (p == FINGERPRINT_ENROLLMISMATCH) {
+      Serial.println("Fingerprints did not match");
+      return p;
+    } else {
+      Serial.println("Unknown error");
+      return p;
+    }
+
+    Serial.print("ID ");
+    Serial.println(id);
+    p = finger.storeModel(id);
+    if (p == FINGERPRINT_OK) {
+      Serial.println("Stored!");
+      finger_store = true;  //"true";
+    } else if (p == FINGERPRINT_PACKETRECIEVEERR) {
+      Serial.println("Communication error");
+      finger_store = false;  //"false";
+      return p;
+    } else if (p == FINGERPRINT_BADLOCATION) {
+      Serial.println("Could not store in that location");
+      finger_store = false;  //"false";
+      return p;
+    } else if (p == FINGERPRINT_FLASHERR) {
+      Serial.println("Error writing to flash");
+      finger_store = false;  //"false";
+      return p;
+    } else {
+      Serial.println("Unknown error");
+      finger_store = false;  //"false";
+      return p;
+    }
+
+    return true;
+  }
+
+  /////////////////////
+
+
+  uint8_t getFingerprintID() {
+    uint8_t p = finger.getImage();
+    switch (p) {
+      case FINGERPRINT_OK:
+        Serial.println("Image taken");
+        break;
+      case FINGERPRINT_NOFINGER:
+        // Serial.println("No finger detected");
+        return p;
+      case FINGERPRINT_PACKETRECIEVEERR:
+        Serial.println("Communication error");
+        return p;
+      case FINGERPRINT_IMAGEFAIL:
+        Serial.println("Imaging error");
+        return p;
+      default:
+        Serial.println("Unknown error");
+        return p;
+    }
+
+    // OK success!
+
+    p = finger.image2Tz();
+    switch (p) {
+      case FINGERPRINT_OK:
+        Serial.println("Image converted");
+        break;
+      case FINGERPRINT_IMAGEMESS:
+        Serial.println("Image too messy");
+        return p;
+      case FINGERPRINT_PACKETRECIEVEERR:
+        Serial.println("Communication error");
+        return p;
+      case FINGERPRINT_FEATUREFAIL:
+        Serial.println("Could not find fingerprint features");
+        return p;
+      case FINGERPRINT_INVALIDIMAGE:
+        Serial.println("Could not find fingerprint features");
+        return p;
+      default:
+        Serial.println("Unknown error");
+        return p;
+    }
+
+    // OK converted!
+    p = finger.fingerSearch();
+    if (p == FINGERPRINT_OK) {
+      Serial.println("Found a print match!");
+    } else if (p == FINGERPRINT_PACKETRECIEVEERR) {
+      Serial.println("Communication error");
+      return p;
+    } else if (p == FINGERPRINT_NOTFOUND) {
+      Serial.println("Did not find a match");
+      finger_match = false;
+      return p;
+    } else {
+      Serial.println("Unknown error");
+      finger_match = false;
+      return p;
+    }
+
+    // found a match!
+    Serial.print("Found ID #");
+    Serial.print(finger.fingerID);
+    Serial.print(" with confidence of ");
+    Serial.println(finger.confidence);
+    Serial.print("--------------------");
+
+    //found = finger.fingerID;
+    //Serial.print(found);
+    //finger_match = true;
+    //return finger.fingerID;
+
+    /////////////////////////////////////////////////////////////////  19/11/2024
+    found = finger.fingerID;
+    Serial.print(found);
+    finger_match = true;
+    digitalWrite(buzzer, HIGH);  //digitalWrite(buzzer, LOW);  // buzzer on
+    delay(1000);                 //delay(2000);
+    digitalWrite(buzzer, LOW);   //digitalWrite(buzzer, HIGH);
+    return finger.fingerID;
+  }
+
+
+
+  // returns -1 if failed, otherwise returns ID #
+  int getFingerprintIDez() {
+    uint8_t p = finger.getImage();
+    if (p != FINGERPRINT_OK) { return -1; }
+
+    p = finger.image2Tz();
+    if (p != FINGERPRINT_OK) { return -1; }
+
+    p = finger.fingerFastSearch();
+    if (p != FINGERPRINT_OK) { return -1; }
+
+    // found a match!
+    Serial.print("Found ID #");
+    Serial.print(finger.fingerID);
+    Serial.print(" with confidence of ");
+    Serial.println(finger.confidence);
+    Serial.print("--------------------");
+    found = finger.fingerID;
+    Serial.print(found);
+    finger_match = true;
+    digitalWrite(buzzer, HIGH);  //digitalWrite(buzzer, LOW);  // buzzer on
+    delay(1100);                 //delay(2000);
+    digitalWrite(buzzer, LOW);   //digitalWrite(buzzer, HIGH);
+    return finger.fingerID;
+  }
+
+  ///////////////////
+
+
+  uint8_t deleteFingerprint(uint8_t id)  // delete the finger print ID
+  {
+    uint8_t p = -1;
+
+    p = finger.deleteModel(id);
+
+    if (p == FINGERPRINT_OK) {
+      Serial.println("Deleted!");
+      finger_delete = true;
+    } else if (p == FINGERPRINT_PACKETRECIEVEERR) {
+      Serial.println("Communication error");
+      finger_delete = false;  //  "false";
+    } else if (p == FINGERPRINT_BADLOCATION) {
+      Serial.println("Could not delete in that location");
+      finger_delete = false;  //"false";
+    } else if (p == FINGERPRINT_FLASHERR) {
+      Serial.println("Error writing to flash");
+      finger_delete = false;  //"false";
+    } else {
+      Serial.print("Unknown error: 0x");
+      Serial.println(p, HEX);
+      finger_delete = false;  //"false";
+    }
+    return p;
+  }
+
+
+
+  //*********************** Add the device during Registrtion
+
+  void add_device() {
+    get_mac_id();
+    send_mac_add();
+    delay(200);
+
+    // while(new_string != "ok" && new_string != "error") { delay(100); }                    // Waiting for respond from mobile app
+
+    if (new_string == "1") { Serial.println("Device Add successfully"); }
+
+    // digitalWrite(buzzer, LOW);                           // buzzer on
+    // delay(500);                                          //delay(2000);
+    // digitalWrite(buzzer, HIGH);
+    //loop_hold = 1;
+
+    else if (new_string == "0") {
+      Serial.println("Error");
+    }
+    new_string = "nill";  //  reset the string
+  }
+
+
+
+  //************************** Fingerprint Enrollment during Deivce registration
+
+
+  void fingerprint_enroll() {
+    int raw = 0;
+    uint8_t s;
+    // fp_id = EEPROM.read(fp_add);       // Intial value of fp_add == 6
+    // Serial.printf("fp_id %d\n", fp_id);
+    delay(2500);
+    if (new_string == fp_id_1 || new_string == fp_id_2 || new_string == fp_id_3) {
+
+      message = "200";  //"ok";                                           // send  fp ID confirmation
+      send_message_bt1();
+
+      fp_id = new_string.toInt();  // convert the string to interger
+      Serial.printf("Finger_print_id %d\n", fp_id);
+      Serial.println(device_mode);
+      digitalWrite(buzzer, HIGH);  //digitalWrite(buzzer, LOW);
+      delay(250);
+      digitalWrite(buzzer, LOW);  //digitalWrite(buzzer, HIGH);
+      message = "Press Finger";
+      send_message_bt1();
+      Serial.println("Waiting for valid finger...");
+      loop_hold = 0;
+      id = fp_id;
+      finger_store = false;  //"false";                            // 5/9/24
+      while (finger_store != true && raw < 25) {
+        getFingerprintEnroll();
+        delay(250);
+        raw++;
+      }
+
+      if (finger_store == true) {
+        digitalWrite(buzzer, HIGH);  //digitalWrite(buzzer, LOW);
+        message = "201";             //"5";           //"Finger Store";
+        send_message_bt1();
+        message = "Finger Store";
+        send_message_bt1();
+        delay(800);
+        digitalWrite(buzzer, LOW);     //digitalWrite(buzzer, HIGH);
+        Serial.printf("ID %d\n", id);  // display fingerprint ID
+        //fp_id++;          // = fp_id + 1;                        // increment the ID number
+        //fp_add++;         //                                     //  increment the FP address also
+        //EEPROM.write(add, fp_id );
+        //EEPROM.commit();
+        new_string = "nill";  //  reset the string
+        // loop_hold = 1;
+        //finger_store = false;          //"false";     //   5/9/24
+
+      }
+
+      else if (finger_store == false) {
+        message = error;  //"Error";
+        send_message_bt1();
+        message = "Finger Not stored";
+        send_message_bt1();
+        new_string = "nill";  // reset the string
+        // loop_hold  = 1;
+      }
+
+      else if (raw >= 25) {
+        message = error;  //"Error";
+        send_message_bt1();
+        message = "Finger not press";
+        send_message_bt1();
+        new_string = "nill";  // reset the string
+        //loop_hold  = 1;
+        //finger_store = "false";     //   5/9/24
+      }
+
+      //finger_store = "false";     //   5/9/24
+      /// fp_id = 0;             //  modify on 7/9/24
+
+    }
+
+    else if (new_string != fp_id_1 && new_string != fp_id_2 && new_string != fp_id_3) {
+      message = error;  //"Error";
+      send_message_bt1();
+      message = "id_not_match";
+      send_message_bt1();
+      new_string = "nill";  //   reset the string
+    }
+  }
+
+
+
+  //************************** Fingerprint Delete in Deivce registration
+
+
+  void fingerprint_delete() {
+    loop_hold = 0;
+    delay(2500);
+    if (new_string == fp_id_1 || new_string == fp_id_2 || new_string == fp_id_3) {
+      message = "ok";
+      send_message_bt1();
+      fp_id = new_string.toInt();  // convert the string to interger
+      Serial.printf("Finger_print_id %d\n", fp_id);
+      deleteFingerprint(fp_id);  //deleteFingerprint(get_id);
+      if (finger_delete == true) {
+        message = "203";  //"Finger Delete";
+        send_message_bt1();
+        new_string = "nill";   //  reset the string
+        finger_store = false;  //"false";     //   5/9/24
+        buz_beep();            // 7/9/24
+      }
+
+      else if (finger_delete == false) {
+        message = error;  // "Error";
+        send_message_bt1();
+        loop_hold = 1;
+      }
+      fp_id = 0;  //  modify on 7/9/24
+    }
+  }
+
+
+
+  // void fingerprint_delete()
+  // {
+
+  //   delay(1000);
+  //   digitalWrite(buzzer,  LOW);
+  //   delay(300);
+  //   digitalWrite(buzzer, HIGH);
+  //   message = "Press Finger";
+  //   send_message_bt1();
+  //   delay(2000);
+  //   loop_hold = 0;
+  //   while ( loop_hold != 1)                          // getFingerprintEnroll();
+  //   {
+  //     int get_id = getFingerprintIDez();
+  //     delay(150);
+  //     Serial.printf("get_id %d\n", get_id);
+  //     if(finger_match == true )                     // Fingerprint match
+  //     {
+
+  //       deleteFingerprint(get_id);                   //   deleteFingerprint(id);
+
+  //       if( finger_delete == true)
+  //       {
+  //         message = "Finger Delete";
+  //         send_message_bt1();
+  //         fp_id--;                                // fp_id = fp_id - 1;
+  //         EEPROM.write(5, fp_id );
+  //         EEPROM.commit();
+  //         Serial.printf ("fp_id %d\n", fp_id);
+  //         new_string = "nill";   //  reset the string
+  //         loop_hold = 1;
+  //       }
+
+  //       else if( finger_delete == false)
+  //       {
+  //         message = "Error";
+  //         send_message_bt1();
+  //         loop_hold = 1;
+  //       }
+  //     }
+
+  //     else if(finger_match == false )                // Fingerprint not match
+  //     {
+  //       message = "Not match";
+  //       send_message_bt1();
+  //       new_string = "nill";   //  reset the string
+  //       loop_hold = 1;
+  //     }
+  //   }
+
+  // }
+
+  /////////////
+
+  void buz_beep() {
+    for (int k = 0; k < 5; k++) {
+      digitalWrite(buzzer, HIGH);  //digitalWrite(buzzer, LOW);  // buzzer on
+      delay(50);                   //delay(2000);
+      digitalWrite(buzzer, LOW);   //digitalWrite(buzzer, HIGH);
+      delay(50);
+    }
+  }
+
+
+
+
+
+  //************************** Fingerprint Delete in  Deivce registration
+
+
+
+  void fpmodule_empty() {
+    finger.emptyDatabase();
+    Serial.println("FP database is empty :)");
+    message = "200";  //fpempty";
+    send_message_bt1();
+    delay(150);
+    new_string = "nill";  //  reset the string
+    buz_beep();           // 7/9/24
+  }
+
+
+
+  //*****************    END       ***********
+
+
+
+///////////////////////////////////////
+
+
+  void route_confirm1()
+  {
+
+    door_status = digitalRead(door);
+    if (door_status == 1)      { door_open = false; }         // driver door is close
+    else if (door_status == 0) {  door_open = true;  }   // driver door is open
+
+    Serial.println("Waiting for route confirm / panicon / nrstart / config or disconnetion ");
+    while ( deviceConnected )
+    {
+      switch(new_string)
+      {
+        case "config":
+        Serial.println("device in config mode");
+        send_message_bt1(rconfig);
+        device_config();
+
+        break;
+        
+        case "confirm":
+        Serial.println("Route confirmed ");
+        send_message_bt1(rconfirm);
+        route_confirm();
+
+        break;
+
+        case "panicon":
+        Serial.println("Device in Panic Mode Start");
+        send_message_bt1(rpanicon);
+        panic_mode();
+
+        break;
+
+        case "nrstart":
+        Serial.println("Device in  Mode Start");
+        send_message_bt1(rnrstart);
+        noroute_mode();
+
+        break;
+              
+      }
+      
+    }
+    
+
+
+
+
+
+
+    
+    while ( new_string != "confirm" && new_string != "panicon" &&  new_string != "nrstart" && deviceConnected )   // Route confirmation
+    {
+      neopixelWrite(rgb_led, 150, 150, 0);   delay(1000);
+      neopixelWrite(rgb_led, 0, 0, 0);       delay(1000);
+    }
+
+    if (deviceConnected)
+    {
+      neopixelWrite(rgb_led, 0, 150, 0);  // Green LED glow
+      //message = "301";                    //"Route Confirmed";
+      //send_message_bt1(rconfirm);  
+     // delay(1000);
+      message = "Engine Start";          //Serial.println("Engine Start");
+      send_message_bt1();
+      digitalWrite(relay, HIGH);         //digitalWrite(relay, LOW);
+      delay(5);
+      digitalWrite(relay, HIGH);  //digitalWrite(relay, LOW);
+      Serial.println("vehicle stop");
+      send_message_bt1(vstop);
+
+      if ( new_string == "panicon" ||  new_string == "nrstart" )
+      {      
+        if ( new_string == "panicon")       { Seria.println("panic pressed");   send_message_bt1(panicon);  } 
+        else if ( new_string == "nrstart")  { Serial.println("No route start");  send_message_bt1(nrstart); }
+        Serial.println("Waiting for panicoff / nrstop ");
+        while ( new_string != "panicoff" && new_string != "nrstop" && deviceConnected )
+        {
+          Serial.println("Device in Panic or nr mode ");
+          delay(3000);                            
+        } 
+        Serial.println("Device out form Panic/fride");
+        digitalWrite(relay, LOW);   delay(5);   digitalWrite(relay, LOW); 
+        if ( new_string == "panicoff")     { Seria.println("panic stop");     send_message_bt1(panicoff);  } 
+        else if ( new_string == "nrstop")  { Serial.println("No route stop");  send_message_bt1(nrstop); }
+        delay(1000);
+        Serial.println("vehicle stop");
+        send_message_bt1(vstop);
+
+
+
+        Serial.println("Engine off");
+      }
+
+       
+              
+          
+      //while( vehicle_status != 'D'   && deviceConnected && door_open == false)
+
+      while (new_string != "deviate" && deviceConnected && door_open == false && new_string != "destination")  
+      {
+        delay(3000);
+        message = "fine";
+        //Serial.print(" fine ");
+        send_message_bt1();
+        door_status = digitalRead(door);
+
+        if (door_status == 0) {
+          door_detection();
+        }
+      }
+
+      device_mode = 'L';  // Device Lock mode
+
+      if (new_string == "destination") {
+        //Serial.println("Route Complete");
+        message = "302";  //"Route Complete";
+        send_message_bt1();
+        delay(30000);              // wait 30 second time to stop the engine.
+        digitalWrite(relay, LOW);  //digitalWrite(relay, HIGH);
+        //Serial.println("Engine Stop");
+        message = "Engine Stop";
+        send_message_bt1();
+        device_mode = 'S';  // Route confirmation mode
+      }
+
+    }
+
+    else if (!deviceConnected) {
+      Serial.println("Connection Lost");  // device disconnected
+      message = "101";
+      send_message_bt1();
+      delay(500);
+      device_mode = 'S';  // Device is start
+    }
+
+    delay(50);
+  }
+
+
+
+
+
+
+
+
+
+

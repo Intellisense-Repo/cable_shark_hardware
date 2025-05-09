@@ -1,0 +1,10 @@
+
+respond commands
+
+vstart     = "316"
+vstop     = "317"
+rconfirm = "301"
+npresp   = "106"
+presp   =   "107"
+
+
